@@ -1,6 +1,7 @@
 from prometheus_client import start_http_server, Gauge  # type: ignore
 from subprocess import Popen, PIPE
 from typing import Dict
+import argparse
 
 
 def get_deviceinfo(name: str) -> Dict[str, str]:
@@ -27,7 +28,7 @@ def get_deviceinfo(name: str) -> Dict[str, str]:
     $
     """
     with Popen(
-        ["geom", "-p", name], stdout=PIPE, bufsize=1, universal_newlines=True
+        ["geom", "DISK", "list", name], stdout=PIPE, bufsize=1, universal_newlines=True
     ) as p:
         result = {}
         for line in p.stdout:
@@ -63,13 +64,20 @@ def process_request() -> None:
     # start with an empty deviceinfo dict and add devices as we see them
     deviceinfo: Dict[str, Dict[str, str]] = {}
 
+
+    # gstat -pdosbI 5s
+    # dT: 0.000s  w: 5.000s
+    #  L(q)  ops/s    r/s     kB   kBps   ms/r    w/s     kB   kBps   ms/w    d/s     kB   kBps   ms/d    o/s   ms/o   %busy Name
+    #     0      0      0      0      0    0.0      0      0      0    0.0      0      0      0    0.0      0    0.0    0.0  vtbd0
+    #     0      0      0      0      0    0.0      0      0      0    0.0      0      0      0    0.0      0    0.0    0.0  cd0
     with Popen(
-        ["gstat", "-pdosCI", "5s"], stdout=PIPE, bufsize=1, universal_newlines=True
+        ["gstat", "-pdosbI", "5s"], stdout=PIPE, bufsize=1, universal_newlines=True
     ) as p:
         for line in p.stdout:
+            values = line.split()
+            if len(values) != 18:
+              continue; # Skip header line(s) which have anything other than 18 items after split
             (
-                timestamp,
-                name,
                 queue_depth,
                 total_operations_per_second,
                 read_operations_per_second,
@@ -87,9 +95,10 @@ def process_request() -> None:
                 other_operations_per_second,
                 miliseconds_per_other,
                 percent_busy,
-            ) = line.split(",")
-            if timestamp == "timestamp":
-                # skip header line
+		name,
+            ) = values
+            if queue_depth in ("L(q)","dT:"):
+                # skip header lines
                 continue
 
             if name not in deviceinfo:
@@ -406,6 +415,16 @@ busy = Gauge(
     ],
 )
 
-start_http_server(9248)
-while True:
-    process_request()
+if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser(description="prometheus exporter for FreeBSD iostat(8)")
+    parser.add_argument("--port", type=int, default=9248)
+    parser.add_argument("--addr", default="")
+    parser.add_argument("--interval", type=int, default=5, help="interval at which gstat(8) is invoked to gather iostats since boot")
+    parser.add_argument("--debug", default=False, action='store_true')
+    args = parser.parse_args()
+
+    start_http_server(args.port, addr=args.addr)
+
+    while True:
+      process_request()
